@@ -125,7 +125,7 @@ def train_ppo():
     ppo_trainer = PPOTrainer(
         args=config,
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=dataset,
         data_collator=collator
     )
