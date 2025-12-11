@@ -2,8 +2,8 @@ import os
 import sys
 class Config:
     # Giá trị mặc định (Fallback) phòng khi quên set secret
-    DEFAULT_BASE_MODEL = "khanhrill/HistoryGPT"
-    DEFAULT_NEW_MODEL = "khanhrill/HistoryGPT-PPO-Kaggle"
+    DEFAULT_BASE_MODEL = "hxndng/HistoryGPT-V1"
+    DEFAULT_NEW_MODEL = "hxndng/HistoryGPT-V1-PPO"
 
     # --- HÀM LẤY SECRET AN TOÀN ---
     @staticmethod

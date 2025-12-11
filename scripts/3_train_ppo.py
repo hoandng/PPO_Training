@@ -50,6 +50,7 @@ def train_ppo():
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
         device_map={"": device_policy},  # Ép vào GPU 0
+        trust_remote_code=True,
         peft_config=LoraConfig(
             r=Config.LORA_R,
             lora_alpha=Config.LORA_ALPHA,
@@ -58,7 +59,10 @@ def train_ppo():
         )
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(
+        Config.BASE_MODEL_NAME,
+        trust_remote_code=True,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -72,6 +76,7 @@ def train_ppo():
         Config.BASE_MODEL_NAME,
         num_labels=2,  # Quan trọng: 2 nhãn (0: Bad, 1: Good)
         quantization_config=bnb_config,
+        trust_remote_code=True,
         device_map={"": device_reward}  # Ép vào GPU 1
     )
 

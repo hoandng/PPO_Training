@@ -25,15 +25,19 @@ def train_reward():
     bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)
 
     # Load Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(
+        Config.BASE_MODEL_NAME,
+        trust_remote_code=True
+    )
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
     # Load Model Classification (2 nhãn: 0=Bad, 1=Good)
     model = AutoModelForSequenceClassification.from_pretrained(
         Config.BASE_MODEL_NAME,
-        num_labels=2,  # Quan trọng: 2 nhãn
+        num_labels=2,
         quantization_config=bnb_config,
-        device_map="auto"
+        device_map="auto",
+        trust_remote_code=True
     )
     model.config.pad_token_id = tokenizer.pad_token_id
     model = prepare_model_for_kbit_training(model)
