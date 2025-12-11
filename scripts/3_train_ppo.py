@@ -56,6 +56,12 @@ def train_ppo():
         )
     )
 
+    # --- FIX LỖI AttributeError: generation_config ---
+    # Gán thủ công config từ model gốc sang model wrapper
+    if hasattr(model.pretrained_model, "generation_config"):
+        model.generation_config = model.pretrained_model.generation_config
+    # -------------------------------------------------
+
     tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -114,13 +120,12 @@ def train_ppo():
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
     )
 
-    # --- SỬA LỖI TẠI ĐÂY (THÊM 3 THAM SỐ NONE) ---
     ppo_trainer = PPOTrainer(
         args=config,
         model=model,
-        ref_model=None,  # <--- QUAN TRỌNG: PEFT tự xử lý ref_model
-        reward_model=None,  # <--- QUAN TRỌNG: Ta tính reward bên ngoài
-        value_model=None,  # <--- QUAN TRỌNG: Value head nằm trong model chính
+        ref_model=None,
+        reward_model=None,
+        value_model=None,
         processing_class=tokenizer,
         train_dataset=dataset,
         data_collator=collator
