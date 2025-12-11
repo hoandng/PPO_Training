@@ -117,20 +117,18 @@ def train_ppo():
         return dict((key, [d[key] for d in data]) for key in data[0])
 
     config = PPOConfig(
-        model_name=Config.BASE_MODEL_NAME,
         learning_rate=Config.LEARNING_RATE,
         batch_size=Config.BATCH_SIZE,
         mini_batch_size=1,  # Giữ nhỏ để an toàn
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
-        log_with=None,
         target_kl=0.1  # Giữ model không đi quá xa model gốc
     )
 
     ppo_trainer = PPOTrainer(
-        config=config,
+        args=config,
         model=model,
         tokenizer=tokenizer,
-        dataset=dataset,
+        train_dataset=dataset,
         data_collator=collator
     )
 
