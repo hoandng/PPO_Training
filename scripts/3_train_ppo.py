@@ -122,7 +122,7 @@ def train_ppo():
         reward_model=None,  # <--- QUAN TRỌNG: Ta tính reward bên ngoài
         value_model=None,  # <--- QUAN TRỌNG: Value head nằm trong model chính
         processing_class=tokenizer,
-        dataset=dataset,
+        train_dataset=dataset,
         data_collator=collator
     )
 
