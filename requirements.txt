@@ -1,13 +1,11 @@
 git+https://github.com/huggingface/transformers.git
 git+https://github.com/huggingface/peft.git
 git+https://github.com/huggingface/trl.git
-
-bitsandbytes>=0.44.1
-accelerate>=1.0.1
+git+https://github.com/huggingface/accelerate.git
+bitsandbytes
+datasets>=2.19.0
 huggingface_hub
 scipy
 pandas
 psycopg2-binary
 sqlalchemy
-pyarrow<15.0.0
-numpy<2.0.0
