@@ -77,7 +77,6 @@ def train_ppo():
         num_labels=2,  # Quan trọng: 2 nhãn (0: Bad, 1: Good)
         quantization_config=bnb_config,
         trust_remote_code=True,
-        device_map={"": device_reward}  # Ép vào GPU 1
     )
 
     # Load Adapter đã train ở bước 2
@@ -121,7 +120,6 @@ def train_ppo():
         batch_size=Config.BATCH_SIZE,
         mini_batch_size=1,  # Giữ nhỏ để an toàn
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
-        target_kl=0.1  # Giữ model không đi quá xa model gốc
     )
 
     ppo_trainer = PPOTrainer(
