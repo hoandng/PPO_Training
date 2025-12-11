@@ -1,73 +1,93 @@
 import sys, os, torch
+import numpy as np
 from datasets import load_dataset
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig
-from peft import LoraConfig, TaskType
-from trl import RewardTrainer, RewardConfig
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig, TrainingArguments, \
+    Trainer, DataCollatorWithPadding
+from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 
 
 def train_reward():
-    print(">>> [2/4] Train Reward Model...")
+    print(">>> [2/4] Train Reward Model (Binary Classification)...")
 
-    if not os.path.exists(Config.DATA_RM_FILE):
-        print("Không tìm thấy data RM. Bỏ qua bước này.")
+    if not os.path.exists(Config.DATA_RM_FILE) or os.path.getsize(Config.DATA_RM_FILE) == 0:
+        print("❌ Lỗi: File data RM rỗng.")
         return
 
+    # Load dataset
     dataset = load_dataset("json", data_files=Config.DATA_RM_FILE, split="train")
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16
-    )
+    # Chia train/test để đánh giá accuracy
+    dataset = dataset.train_test_split(test_size=0.1)
 
-    # Load model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        Config.BASE_MODEL_NAME, num_labels=1, quantization_config=bnb_config, device_map="auto"
-    )
+    bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)
+
+    # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME)
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
+
+    # Load Model Classification (2 nhãn: 0=Bad, 1=Good)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        Config.BASE_MODEL_NAME,
+        num_labels=2,  # Quan trọng: 2 nhãn
+        quantization_config=bnb_config,
+        device_map="auto"
+    )
     model.config.pad_token_id = tokenizer.pad_token_id
+    model = prepare_model_for_kbit_training(model)
 
     # LoRA Config
     peft_config = LoraConfig(
-        task_type=TaskType.SEQ_CLS, r=Config.LORA_R, lora_alpha=Config.LORA_ALPHA,
-        lora_dropout=Config.LORA_DROPOUT, target_modules=["q_proj", "v_proj"]
+        task_type=TaskType.SEQ_CLS,
+        r=Config.LORA_R,
+        lora_alpha=Config.LORA_ALPHA,
+        lora_dropout=Config.LORA_DROPOUT,
+        target_modules=["q_proj", "v_proj"]
     )
+    model = get_peft_model(model, peft_config)
 
+    # Hàm Tokenize
     def preprocess(examples):
-        new_examples = {"input_ids_chosen": [], "attention_mask_chosen": [], "input_ids_rejected": [],
-                        "attention_mask_rejected": []}
-        for prompt, chosen, rejected in zip(examples["prompt"], examples["chosen"], examples["rejected"]):
-            # Format đơn giản hoặc dùng template
-            c_txt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{chosen}<|im_end|>"
-            r_txt = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n{rejected}<|im_end|>"
+        return tokenizer(examples["text"], truncation=True, max_length=Config.MAX_SEQ_LENGTH)
 
-            tok_c = tokenizer(c_txt, truncation=True, max_length=Config.MAX_SEQ_LENGTH)
-            tok_r = tokenizer(r_txt, truncation=True, max_length=Config.MAX_SEQ_LENGTH)
+    tokenized_datasets = dataset.map(preprocess, batched=True)
 
-            new_examples["input_ids_chosen"].append(tok_c["input_ids"])
-            new_examples["attention_mask_chosen"].append(tok_c["attention_mask"])
-            new_examples["input_ids_rejected"].append(tok_r["input_ids"])
-            new_examples["attention_mask_rejected"].append(tok_r["attention_mask"])
-        return new_examples
+    # Định nghĩa Metric để xem độ chính xác
+    def compute_metrics(eval_pred):
+        predictions, labels = eval_pred
+        predictions = np.argmax(predictions, axis=1)
+        return {"accuracy": (predictions == labels).mean()}
 
-    dataset = dataset.map(preprocess, batched=True)
-
-    trainer = RewardTrainer(
-        model=model, tokenizer=tokenizer, peft_config=peft_config, train_dataset=dataset,
-        args=RewardConfig(
-            output_dir=Config.REWARD_ADAPTER_PATH,
-            per_device_train_batch_size=Config.BATCH_SIZE,
-            gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
-            num_train_epochs=1,
-            report_to="none",
-            fp16=True
-        )
+    # Trainer Config
+    training_args = TrainingArguments(
+        output_dir=Config.REWARD_ADAPTER_PATH,
+        per_device_train_batch_size=Config.BATCH_SIZE,
+        gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
+        num_train_epochs=Config.NUM_EPOCHS,  # Có thể tăng lên 2-3 nếu data ít
+        learning_rate=2e-5,
+        logging_steps=10,
+        eval_strategy="steps",
+        eval_steps=50,
+        save_strategy="no",  # Không save checkpoint rác
+        fp16=True,
+        report_to="none"
     )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets["test"],
+        tokenizer=tokenizer,
+        data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
+        compute_metrics=compute_metrics
+    )
+
     trainer.train()
     trainer.model.save_pretrained(Config.REWARD_ADAPTER_PATH)
-    print("✅ Reward Model Adapter Saved.")
+    print("✅ Reward Model (Classifier) Saved.")
 
 
 if __name__ == "__main__":
