@@ -15,7 +15,6 @@ if parent_dir not in sys.path:
 try:
     from config import Config
 except ImportError:
-    # Fallback nếu chạy trực tiếp trong thư mục scripts
     sys.path.append("/kaggle/working/HistoryGPT-Kaggle-PPO")
     from config import Config
 
@@ -23,7 +22,7 @@ except ImportError:
 def train_ppo():
     print(">>> [3/4] Train PPO với Dual GPU Strategy (Classification Reward)...")
 
-    # 1. Cấu hình GPU (Kaggle T4 x2)
+    # 1. Cấu hình GPU
     if torch.cuda.device_count() < 2:
         print("⚠️ Cảnh báo: Chỉ tìm thấy 1 GPU. Có thể gặp lỗi OOM.")
         device_policy = 0
@@ -33,7 +32,6 @@ def train_ppo():
         device_policy = 0
         device_reward = 1
 
-    # Config Quantization (4-bit) để tiết kiệm VRAM
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
@@ -45,11 +43,10 @@ def train_ppo():
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
-    # PPO cần model có Value Head
     model = AutoModelForCausalLMWithValueHead.from_pretrained(
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
-        device_map={"": device_policy},  # Ép vào GPU 0
+        device_map={"": device_policy},
         trust_remote_code=True,
         peft_config=LoraConfig(
             r=Config.LORA_R,
@@ -59,10 +56,7 @@ def train_ppo():
         )
     )
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        Config.BASE_MODEL_NAME,
-        trust_remote_code=True,
-    )
+    tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -71,15 +65,14 @@ def train_ppo():
     # =================================================================
     print(f"Loading Reward Model on cuda:{device_reward}...")
 
-    # Load Base Model (Classification - 2 labels)
     rm_base = AutoModelForSequenceClassification.from_pretrained(
         Config.BASE_MODEL_NAME,
-        num_labels=2,  # Quan trọng: 2 nhãn (0: Bad, 1: Good)
+        num_labels=2,
         quantization_config=bnb_config,
-        trust_remote_code=True,
+        device_map={"": device_reward},
+        trust_remote_code=True
     )
 
-    # Load Adapter đã train ở bước 2
     try:
         rm_model = PeftModel.from_pretrained(rm_base, Config.REWARD_ADAPTER_PATH)
         print("✅ Đã load Reward Adapter thành công.")
@@ -87,8 +80,7 @@ def train_ppo():
         print(f"❌ Lỗi load Reward Adapter: {e}")
         return
 
-    # Tạo pipeline inference trên GPU 1
-    # top_k=None để trả về score của cả 2 nhãn (Good/Bad)
+    # Pipeline
     reward_pipe = pipeline(
         "text-classification",
         model=rm_model,
@@ -118,15 +110,19 @@ def train_ppo():
     config = PPOConfig(
         learning_rate=Config.LEARNING_RATE,
         batch_size=Config.BATCH_SIZE,
-        mini_batch_size=1,  # Giữ nhỏ để an toàn
+        mini_batch_size=1,
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
     )
 
+    # --- SỬA LỖI TẠI ĐÂY (THÊM 3 THAM SỐ NONE) ---
     ppo_trainer = PPOTrainer(
-        args=config,
+        config=config,
         model=model,
+        ref_model=None,  # <--- QUAN TRỌNG: PEFT tự xử lý ref_model
+        reward_model=None,  # <--- QUAN TRỌNG: Ta tính reward bên ngoài
+        value_model=None,  # <--- QUAN TRỌNG: Value head nằm trong model chính
         processing_class=tokenizer,
-        train_dataset=dataset,
+        dataset=dataset,
         data_collator=collator
     )
 
@@ -138,7 +134,7 @@ def train_ppo():
     generation_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
-        "top_p": 0.9,  # Dùng top_p sampling cho tự nhiên
+        "top_p": 0.9,
         "do_sample": True,
         "pad_token_id": tokenizer.eos_token_id,
         "max_new_tokens": 128
@@ -149,53 +145,41 @@ def train_ppo():
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["input_ids"]
 
-        # --- A. GENERATE (POLICY MODEL - GPU 0) ---
+        # A. GENERATE (GPU 0)
         response_tensors = []
         for query in query_tensors:
-            # Chuyển query sang GPU 0
             q_tensor = torch.tensor(query).to(f"cuda:{device_policy}").unsqueeze(0)
-
-            # Generate câu trả lời
             r = ppo_trainer.generate(q_tensor, **generation_kwargs)
-
-            # Cắt bỏ phần query, chỉ giữ lại phần answer mới sinh ra
             response_tensors.append(r.squeeze()[len(query):])
 
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
-        # --- B. COMPUTE REWARD (REWARD MODEL - GPU 1) ---
-        # Tạo prompt đầy đủ cho Reward Model chấm
+        # B. COMPUTE REWARD (GPU 1)
         texts = [f"<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n{r}<|im_end|>" for q, r in
                  zip(batch["query"], batch["response"])]
 
-        # Inference trên GPU 1
+        # Inference
         pipe_outputs = reward_pipe(texts)
 
         rewards = []
         for output in pipe_outputs:
-            # output dạng: [{'label': 'LABEL_0', 'score': 0.1}, {'label': 'LABEL_1', 'score': 0.9}]
-            # LABEL_1 là lớp "Tốt" (Rating = 1)
             score_good = 0.0
             for item in output:
-                # Kiểm tra label nào là label Positive
-                if item['label'] == 'LABEL_1' or item['label'] == '1':
+                # Lấy score của nhãn '1' (Tốt)
+                if str(item['label']) in ['1', 'LABEL_1']:
                     score_good = item['score']
                     break
 
-            # Tính Reward:
-            # score_good chạy từ 0 đến 1.
-            # Trừ đi 0.5 để reward chạy từ -0.5 (Rất tệ) đến +0.5 (Rất tốt) -> Giúp PPO hội tụ nhanh hơn
+            # Tính reward: (0.9 -> 0.4), (0.1 -> -0.4)
             final_reward = score_good - 0.5
-
-            # Chuyển reward về GPU 0 để PPO Trainer dùng
             rewards.append(torch.tensor(final_reward).to(f"cuda:{device_policy}"))
 
-        # --- C. UPDATE POLICY (GPU 0) ---
+        # C. UPDATE (GPU 0)
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
 
         step_count += 1
         avg_reward = torch.mean(torch.stack(rewards)).item()
-        print(f"Step {step_count}: Reward Trung bình = {avg_reward:.4f}")
+        print(f"Step {step_count}: Reward Avg = {avg_reward:.4f}")
 
     # =================================================================
     # 6. SAVE ADAPTER
@@ -209,10 +193,4 @@ def train_ppo():
 
 
 if __name__ == "__main__":
-    # Validate Config trước khi chạy
-    try:
-        Config.validate()
-    except:
-        pass  # Bỏ qua nếu chạy test cục bộ
-
     train_ppo()
