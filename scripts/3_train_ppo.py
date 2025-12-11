@@ -116,7 +116,7 @@ def train_ppo():
 
     # --- SỬA LỖI TẠI ĐÂY (THÊM 3 THAM SỐ NONE) ---
     ppo_trainer = PPOTrainer(
-        config=config,
+        args=config,
         model=model,
         ref_model=None,  # <--- QUAN TRỌNG: PEFT tự xử lý ref_model
         reward_model=None,  # <--- QUAN TRỌNG: Ta tính reward bên ngoài
