@@ -52,7 +52,7 @@ class Config:
     BATCH_SIZE = 2
     GRAD_ACCUM_STEPS = 4
     MAX_SEQ_LENGTH = 1024
-
+    NUM_EPOCHS = 1
     @classmethod
     def validate(cls):
         print(f">>> Cấu hình hiện tại:")
