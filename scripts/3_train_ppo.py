@@ -94,7 +94,6 @@ def train_ppo():
         "text-classification",
         model=rm_model,
         tokenizer=tokenizer,
-        device=device_reward,
         batch_size=Config.BATCH_SIZE * 2,
         top_k=None
     )
