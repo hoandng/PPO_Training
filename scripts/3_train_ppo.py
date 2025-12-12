@@ -157,11 +157,11 @@ def train_ppo():
 
     # Khởi tạo PPOTrainer (Với TRL 0.12.0 stable, dùng 'tokenizer', không dùng 'processing_class')
     ppo_trainer = PPOTrainer(
-        config=config,
+        args=config,
         model=model,
         ref_model=None,
         tokenizer=tokenizer,  # Quay lại dùng tokenizer (bản stable)
-        dataset=dataset,
+        train_dataset=dataset,
         data_collator=collator
     )
 
