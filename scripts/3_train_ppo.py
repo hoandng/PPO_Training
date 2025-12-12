@@ -6,11 +6,10 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     pipeline,
-    AutoModelForSequenceClassification,
-    AutoModelForCausalLM
+    AutoModelForSequenceClassification
 )
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel
 
 # --- SETUP PATH ĐỂ IMPORT CONFIG ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -49,34 +48,31 @@ def train_ppo():
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
-    # BƯỚC 1: Load Base Model bình thường trước
-    base_model = AutoModelForCausalLM.from_pretrained(
+    # Sử dụng from_pretrained chuẩn của TRL
+    model = AutoModelForCausalLMWithValueHead.from_pretrained(
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
         device_map={"": device_policy},
-        trust_remote_code=True
+        trust_remote_code=True,
+        peft_config=LoraConfig(
+            r=Config.LORA_R,
+            lora_alpha=Config.LORA_ALPHA,
+            task_type="CAUSAL_LM",
+            target_modules=["q_proj", "v_proj"]
+        )
     )
 
-    # BƯỚC 2: Áp dụng LoRA thủ công
-    peft_config = LoraConfig(
-        r=Config.LORA_R,
-        lora_alpha=Config.LORA_ALPHA,
-        task_type="CAUSAL_LM",
-        target_modules=["q_proj", "v_proj"]
-    )
-    # Kích hoạt gradient checkpointing để tiết kiệm VRAM
-    base_model.gradient_checkpointing_enable()
-    base_model = get_peft_model(base_model, peft_config)
-
-    # BƯỚC 3: Wrap vào ValueHead Model của TRL
-    # (Lúc này base_model đã là PeftModel)
-    model = AutoModelForCausalLMWithValueHead(base_model)
-
-    # Fix lỗi generation_config (nếu có)
+    # --- VÁ LỖI generation_config ---
+    # Model wrapper của TRL đôi khi không forward generation_config từ model gốc ra ngoài
+    # Ta gán thủ công để tránh lỗi AttributeError khi generate
     if hasattr(model.pretrained_model, "generation_config"):
         model.generation_config = model.pretrained_model.generation_config
+    else:
+        # Fallback nếu model gốc cũng không có (ít khi xảy ra với Qwen)
+        from transformers import GenerationConfig
+        model.generation_config = GenerationConfig.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
+    # -------------------------------
 
-    # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -141,7 +137,7 @@ def train_ppo():
         ref_model=None,
         reward_model=None,
         value_model=None,
-        processing_class=tokenizer,
+        processing_class=tokenizer,  # Đã đổi tên từ 'tokenizer'
         train_dataset=dataset,
         data_collator=collator
     )
@@ -169,6 +165,7 @@ def train_ppo():
         response_tensors = []
         for query in query_tensors:
             q_tensor = torch.tensor(query).to(f"cuda:{device_policy}").unsqueeze(0)
+            # Gọi generate trên model wrapper (đã được vá generation_config)
             r = ppo_trainer.generate(q_tensor, **generation_kwargs)
             response_tensors.append(r.squeeze()[len(query):])
 
