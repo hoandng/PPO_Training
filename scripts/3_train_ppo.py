@@ -9,7 +9,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForCausalLM
 )
-# Import từ experimental theo warning của log
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
@@ -50,18 +49,16 @@ def train_ppo():
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
-    # BƯỚC A: Load Base Model bằng Transformers thuần
+    # BƯỚC A: Load Base Model
     base_model = AutoModelForCausalLM.from_pretrained(
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
         device_map={"": device_policy},
         trust_remote_code=True
     )
-
-    # BƯỚC B: Chuẩn bị model cho training 4-bit
     base_model = prepare_model_for_kbit_training(base_model)
 
-    # BƯỚC C: Gắn LoRA thủ công
+    # BƯỚC B: Gắn LoRA
     peft_config = LoraConfig(
         r=Config.LORA_R,
         lora_alpha=Config.LORA_ALPHA,
@@ -72,13 +69,11 @@ def train_ppo():
     )
     base_model = get_peft_model(base_model, peft_config)
 
-    # BƯỚC D: Đóng gói vào TRL Wrapper (Value Head)
+    # BƯỚC C: Đóng gói vào TRL Wrapper
     model = AutoModelForCausalLMWithValueHead(base_model)
-
-    # Kích hoạt gradient cho Value Head
     model.v_head.requires_grad_(True)
 
-    # BƯỚC E: Vá lỗi generation_config
+    # --- PATCH 1: Vá lỗi generation_config ---
     if hasattr(model.pretrained_model, "generation_config"):
         model.generation_config = model.pretrained_model.generation_config
     else:
@@ -87,6 +82,16 @@ def train_ppo():
             model.generation_config = GenerationConfig.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
         except:
             model.generation_config = GenerationConfig()
+
+    # --- PATCH 2: Vá lỗi base_model_prefix (FIX LỖI MỚI NHẤT) ---
+    # TRL Trainer cần thuộc tính này để tìm backbone, nhưng Wrapper lại ẩn nó đi.
+    # Ta copy thủ công từ model gốc ra ngoài Wrapper.
+    if not hasattr(model, "base_model_prefix"):
+        if hasattr(model.pretrained_model, "base_model_prefix"):
+            model.base_model_prefix = model.pretrained_model.base_model_prefix
+        else:
+            model.base_model_prefix = "model"  # Giá trị mặc định cho Qwen/Llama
+    # -------------------------------------------------------------
 
     # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
@@ -147,13 +152,12 @@ def train_ppo():
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
     )
 
-    # --- SỬA LỖI TẠI ĐÂY ---
     ppo_trainer = PPOTrainer(
         args=config,
         model=model,
         ref_model=None,
         reward_model=None,
-        value_model=model,  # <--- FIX: Truyền chính model vào đây thay vì None
+        value_model=model,  # Dùng chính model làm value model (Shared backbone)
         processing_class=tokenizer,
         train_dataset=dataset,
         data_collator=collator
@@ -198,12 +202,11 @@ def train_ppo():
         for output in pipe_outputs:
             score_good = 0.0
             for item in output:
-                # Lấy score của nhãn '1' (Tốt)
                 if str(item['label']) in ['1', 'LABEL_1']:
                     score_good = item['score']
                     break
 
-            # Tính reward
+            # Tính reward: (0.9 -> 0.4), (0.1 -> -0.4)
             final_reward = score_good - 0.5
             rewards.append(torch.tensor(final_reward).to(f"cuda:{device_policy}"))
 
@@ -221,7 +224,6 @@ def train_ppo():
     if not os.path.exists(Config.PPO_ADAPTER_PATH):
         os.makedirs(Config.PPO_ADAPTER_PATH)
 
-    # Lưu Adapter của model gốc (đã được fine-tune)
     model.pretrained_model.save_pretrained(Config.PPO_ADAPTER_PATH)
     print(f"✅ Đã lưu Adapter tại: {Config.PPO_ADAPTER_PATH}")
 
