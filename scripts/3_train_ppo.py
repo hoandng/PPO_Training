@@ -2,9 +2,15 @@ import sys
 import os
 import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, BitsAndBytesConfig, pipeline, AutoModelForSequenceClassification
+from transformers import (
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    pipeline,
+    AutoModelForSequenceClassification,
+    AutoModelForCausalLM
+)
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
-from peft import LoraConfig, PeftModel
+from peft import LoraConfig, PeftModel, get_peft_model
 
 # --- SETUP PATH ĐỂ IMPORT CONFIG ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -43,25 +49,34 @@ def train_ppo():
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(
+    # BƯỚC 1: Load Base Model bình thường trước
+    base_model = AutoModelForCausalLM.from_pretrained(
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
         device_map={"": device_policy},
-        trust_remote_code=True,
-        peft_config=LoraConfig(
-            r=Config.LORA_R,
-            lora_alpha=Config.LORA_ALPHA,
-            task_type="CAUSAL_LM",
-            target_modules=["q_proj", "v_proj"]
-        )
+        trust_remote_code=True
     )
 
-    # --- FIX LỖI AttributeError: generation_config ---
-    # Gán thủ công config từ model gốc sang model wrapper
+    # BƯỚC 2: Áp dụng LoRA thủ công
+    peft_config = LoraConfig(
+        r=Config.LORA_R,
+        lora_alpha=Config.LORA_ALPHA,
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj"]
+    )
+    # Kích hoạt gradient checkpointing để tiết kiệm VRAM
+    base_model.gradient_checkpointing_enable()
+    base_model = get_peft_model(base_model, peft_config)
+
+    # BƯỚC 3: Wrap vào ValueHead Model của TRL
+    # (Lúc này base_model đã là PeftModel)
+    model = AutoModelForCausalLMWithValueHead(base_model)
+
+    # Fix lỗi generation_config (nếu có)
     if hasattr(model.pretrained_model, "generation_config"):
         model.generation_config = model.pretrained_model.generation_config
-    # -------------------------------------------------
 
+    # Load Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -121,13 +136,13 @@ def train_ppo():
     )
 
     ppo_trainer = PPOTrainer(
-        args=config,
+        config=config,
         model=model,
         ref_model=None,
         reward_model=None,
         value_model=None,
         processing_class=tokenizer,
-        train_dataset=dataset,
+        dataset=dataset,
         data_collator=collator
     )
 
@@ -175,7 +190,7 @@ def train_ppo():
                     score_good = item['score']
                     break
 
-            # Tính reward: (0.9 -> 0.4), (0.1 -> -0.4)
+            # Tính reward
             final_reward = score_good - 0.5
             rewards.append(torch.tensor(final_reward).to(f"cuda:{device_policy}"))
 
