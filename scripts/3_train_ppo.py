@@ -27,7 +27,7 @@ except ImportError:
 
 
 def train_ppo():
-    print(">>> [3/4] Train PPO Strategy (Stable + Defensive Coding)...")
+    print(">>> [3/4] Train PPO Strategy (Stable + Defensive Patching)...")
 
     # 1. SETUP GPU
     if torch.cuda.device_count() < 2:
@@ -46,7 +46,7 @@ def train_ppo():
     )
 
     # =================================================================
-    # 2. LOAD POLICY MODEL (MANUAL + PATCHING) -> GPU 0
+    # 2. LOAD POLICY MODEL -> GPU 0
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
@@ -75,27 +75,28 @@ def train_ppo():
     model.v_head.requires_grad_(True)
 
     # =================================================================
-    # 🛡️ MONKEY PATCHING BLOCK (KHẮC PHỤC MỌI LỖI ATTRIBUTE)
+    # 🛡️ MONKEY PATCHING BLOCK (VÁ LỖI QUAN TRỌNG)
     # =================================================================
     print("🛡️ Applying Defensive Patches...")
 
-    # Patch 1: "base_model_prefix" (Fix lỗi NoneType attribute)
+    # 1. Vá lỗi "base_model_prefix" (Lỗi bạn vừa gặp)
+    # TRL cần thuộc tính này để tìm backbone, ta gán cứng là "model" (chuẩn Qwen/Llama)
     if not hasattr(model, "base_model_prefix"):
         model.base_model_prefix = "model"
 
-    # Patch 2: "model" attribute (Fix lỗi object has no attribute 'model')
-    # Một số version TRL gọi self.model, một số gọi self.pretrained_model
+    # 2. Vá lỗi "object has no attribute 'model'"
+    # Một số version TRL tìm self.model thay vì self.pretrained_model
     if not hasattr(model, "model"):
         model.model = model.pretrained_model
 
-    # Patch 3: "generation_config" (Fix lỗi generate)
+    # 3. Vá lỗi "generation_config"
     if not hasattr(model, "generation_config"):
         if hasattr(model.pretrained_model, "generation_config"):
             model.generation_config = model.pretrained_model.generation_config
         else:
             model.generation_config = GenerationConfig()
 
-    # Patch 4: is_peft_model flag
+    # 4. Đánh dấu model PEFT
     model.is_peft_model = True
     print("✅ Patches applied.")
     # =================================================================
@@ -108,6 +109,7 @@ def train_ppo():
     # 3. LOAD REWARD MODEL -> GPU 1
     # =================================================================
     print(f"Loading Reward Model on cuda:{device_reward}...")
+
     rm_base = AutoModelForSequenceClassification.from_pretrained(
         Config.BASE_MODEL_NAME,
         num_labels=2,
@@ -115,13 +117,14 @@ def train_ppo():
         device_map={"": device_reward},
         trust_remote_code=True
     )
+
     try:
         rm_model = PeftModel.from_pretrained(rm_base, Config.REWARD_ADAPTER_PATH)
     except Exception as e:
         print(f"❌ Error loading Reward Adapter: {e}")
         return
 
-    # Pipeline
+    # Pipeline Inference
     reward_pipe = pipeline(
         "text-classification",
         model=rm_model,
@@ -155,13 +158,13 @@ def train_ppo():
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
     )
 
-    # Khởi tạo PPOTrainer (Với TRL 0.12.0 stable, dùng 'tokenizer', không dùng 'processing_class')
+    # --- KHỞI TẠO TRAINER (CHUẨN STABLE TRL 0.12.0) ---
     ppo_trainer = PPOTrainer(
-        args=config,
+        config=config,  # Dùng 'config', KHÔNG dùng 'args'
         model=model,
-        ref_model=None,
-        processing_class=tokenizer,  # Quay lại dùng tokenizer (bản stable)
-        train_dataset=dataset,
+        ref_model=None,  # PEFT tự lo ref_model
+        tokenizer=tokenizer,  # Dùng 'tokenizer', KHÔNG dùng 'processing_class'
+        dataset=dataset,  # Dùng 'dataset', KHÔNG dùng 'train_dataset'
         data_collator=collator
     )
 
@@ -183,7 +186,7 @@ def train_ppo():
     for epoch, batch in enumerate(ppo_trainer.dataloader):
         query_tensors = batch["input_ids"]
 
-        # A. Generate
+        # A. Generate (GPU 0)
         response_tensors = []
         for query in query_tensors:
             q_tensor = torch.tensor(query).to(f"cuda:{device_policy}").unsqueeze(0)
@@ -192,7 +195,7 @@ def train_ppo():
 
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
-        # B. Reward
+        # B. Reward (GPU 1)
         texts = [f"<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n{r}<|im_end|>" for q, r in
                  zip(batch["query"], batch["response"])]
         pipe_outputs = reward_pipe(texts)
@@ -201,12 +204,16 @@ def train_ppo():
         for output in pipe_outputs:
             score_good = 0.0
             for item in output:
+                # Lấy score của nhãn '1' (Tốt)
                 if str(item['label']) in ['1', 'LABEL_1']:
                     score_good = item['score']
                     break
-            rewards.append(torch.tensor(score_good - 0.5).to(f"cuda:{device_policy}"))
 
-        # C. Step
+            # Tính reward: (0.9 -> 0.4), (0.1 -> -0.4)
+            final_reward = score_good - 0.5
+            rewards.append(torch.tensor(final_reward).to(f"cuda:{device_policy}"))
+
+        # C. Step (GPU 0)
         stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
         step_count += 1
         print(f"Step {step_count}: Reward Avg = {torch.mean(torch.stack(rewards)).item():.4f}")
@@ -214,13 +221,13 @@ def train_ppo():
     # =================================================================
     # 6. SAVE
     # =================================================================
-    print(">>> Saving...")
+    print(">>> Saving PPO Adapter...")
     if not os.path.exists(Config.PPO_ADAPTER_PATH):
         os.makedirs(Config.PPO_ADAPTER_PATH)
 
-    # Save adapter của pretrained model
+    # Save adapter của model gốc
     model.pretrained_model.save_pretrained(Config.PPO_ADAPTER_PATH)
-    print("✅ Done.")
+    print(f"✅ Đã lưu Adapter tại: {Config.PPO_ADAPTER_PATH}")
 
 
 if __name__ == "__main__":
