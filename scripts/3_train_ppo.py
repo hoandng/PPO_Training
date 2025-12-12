@@ -9,6 +9,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoModelForCausalLM
 )
+# Import từ experimental theo warning của log
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 
@@ -49,7 +50,7 @@ def train_ppo():
     # =================================================================
     print(f"Loading Policy Model on cuda:{device_policy}...")
 
-    # BƯỚC A: Load Base Model bằng Transformers thuần (Tránh lỗi TRL)
+    # BƯỚC A: Load Base Model bằng Transformers thuần
     base_model = AutoModelForCausalLM.from_pretrained(
         Config.BASE_MODEL_NAME,
         quantization_config=bnb_config,
@@ -57,7 +58,7 @@ def train_ppo():
         trust_remote_code=True
     )
 
-    # BƯỚC B: Chuẩn bị model cho training 4-bit (QUAN TRỌNG)
+    # BƯỚC B: Chuẩn bị model cho training 4-bit
     base_model = prepare_model_for_kbit_training(base_model)
 
     # BƯỚC C: Gắn LoRA thủ công
@@ -72,17 +73,15 @@ def train_ppo():
     base_model = get_peft_model(base_model, peft_config)
 
     # BƯỚC D: Đóng gói vào TRL Wrapper (Value Head)
-    # Thay vì dùng .from_pretrained (gây lỗi), ta khởi tạo trực tiếp từ base_model
     model = AutoModelForCausalLMWithValueHead(base_model)
 
-    # Kích hoạt gradient cho Value Head (vì nó là lớp mới thêm vào)
+    # Kích hoạt gradient cho Value Head
     model.v_head.requires_grad_(True)
 
-    # BƯỚC E: Vá lỗi generation_config (cho Qwen)
+    # BƯỚC E: Vá lỗi generation_config
     if hasattr(model.pretrained_model, "generation_config"):
         model.generation_config = model.pretrained_model.generation_config
     else:
-        # Fallback tạo config mặc định
         from transformers import GenerationConfig
         try:
             model.generation_config = GenerationConfig.from_pretrained(Config.BASE_MODEL_NAME, trust_remote_code=True)
@@ -148,13 +147,14 @@ def train_ppo():
         gradient_accumulation_steps=Config.GRAD_ACCUM_STEPS,
     )
 
+    # --- SỬA LỖI TẠI ĐÂY ---
     ppo_trainer = PPOTrainer(
         args=config,
         model=model,
         ref_model=None,
         reward_model=None,
-        value_model=None,
-        processing_class=tokenizer,  # Đã sửa thành processing_class
+        value_model=model,  # <--- FIX: Truyền chính model vào đây thay vì None
+        processing_class=tokenizer,
         train_dataset=dataset,
         data_collator=collator
     )
@@ -221,8 +221,7 @@ def train_ppo():
     if not os.path.exists(Config.PPO_ADAPTER_PATH):
         os.makedirs(Config.PPO_ADAPTER_PATH)
 
-    # Lưu ý: Khi save thủ công kiểu này, ta cần save adapter của pretrained_model
-    # model.pretrained_model chính là cái PeftModel ta tạo ở Bước C
+    # Lưu Adapter của model gốc (đã được fine-tune)
     model.pretrained_model.save_pretrained(Config.PPO_ADAPTER_PATH)
     print(f"✅ Đã lưu Adapter tại: {Config.PPO_ADAPTER_PATH}")
 
