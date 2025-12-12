@@ -160,7 +160,7 @@ def train_ppo():
         args=config,
         model=model,
         ref_model=None,
-        tokenizer=tokenizer,  # Quay lại dùng tokenizer (bản stable)
+        processing_class=tokenizer,  # Quay lại dùng tokenizer (bản stable)
         train_dataset=dataset,
         data_collator=collator
     )
