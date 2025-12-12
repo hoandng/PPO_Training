@@ -136,13 +136,13 @@ def train_ppo():
     )
 
     ppo_trainer = PPOTrainer(
-        config=config,
+        args=config,
         model=model,
         ref_model=None,
         reward_model=None,
         value_model=None,
         processing_class=tokenizer,
-        dataset=dataset,
+        train_dataset=dataset,
         data_collator=collator
     )
 
